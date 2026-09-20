@@ -3,38 +3,28 @@
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // Views provide access to Grid storage without allocating or copying elements.
-struct ConstGridView {
-  const double* values;
+template <typename Element>
+struct BasicGridView {
+  Element* values;
   std::size_t rows;
   std::size_t cols;
   std::size_t stride;
 
-  const double* row_data(const std::size_t row) const noexcept {
+  Element* row_data(const std::size_t row) const noexcept {
     return values + row * stride;
   }
 
-  double operator()(const std::size_t row, const std::size_t col) const noexcept {
+  Element& operator()(const std::size_t row, const std::size_t col) const noexcept {
     return row_data(row)[col];
   }
 };
 
-struct GridView {
-  double* values;
-  std::size_t rows;
-  std::size_t cols;
-  std::size_t stride;
-
-  double* row_data(const std::size_t row) const noexcept {
-    return values + row * stride;
-  }
-
-  double& operator()(const std::size_t row, const std::size_t col) const noexcept {
-    return row_data(row)[col];
-  }
-};
+using ConstGridView = BasicGridView<const double>;
+using GridView = BasicGridView<double>;
 
 // Grid owns one contiguous row-major allocation and its lifetime.
 class Grid {
@@ -52,6 +42,17 @@ private:
     }
 
     return rows * stride;
+  }
+
+  std::size_t checked_offset(const std::size_t row, const std::size_t col) const {
+    if (row >= rows_ || col >= cols_) {
+      throw std::out_of_range("Grid index (" + std::to_string(row) + ", " +
+                              std::to_string(col) + ") is outside dimensions (" +
+                              std::to_string(rows_) + ", " + std::to_string(cols_) +
+                              ")");
+    }
+
+    return row * stride_ + col;
   }
 
 public:
@@ -76,12 +77,12 @@ public:
     return GridView{values_.data(), rows_, cols_, stride_};
   }
 
-  double& operator()(const std::size_t row, const std::size_t col) noexcept {
-    return values_[row * stride_ + col];
+  double& operator()(const std::size_t row, const std::size_t col) {
+    return values_[checked_offset(row, col)];
   }
 
-  double operator()(const std::size_t row, const std::size_t col) const noexcept {
-    return values_[row * stride_ + col];
+  double operator()(const std::size_t row, const std::size_t col) const {
+    return values_[checked_offset(row, col)];
   }
 };
 
@@ -114,13 +115,17 @@ inline void update_interior(const ConstGridView old_grid, const GridView new_gri
     return;
   }
 
+  // apply_stencil rejects overlapping grids, so these base pointers do not alias.
+  const double* __restrict__ old_values{old_grid.values};
+  double* __restrict__ new_values{new_grid.values};
+
   // Each row writes to a separate output range, so static partitioning is safe.
   #pragma omp parallel for schedule(static)
   for (std::size_t row = 1; row < old_grid.rows - 1; ++row) {
-    const double* const above{old_grid.row_data(row - 1)};
-    const double* const current{old_grid.row_data(row)};
-    const double* const below{old_grid.row_data(row + 1)};
-    double* const output{new_grid.row_data(row)};
+    const double* const above{old_values + (row - 1) * old_grid.stride};
+    const double* const current{old_values + row * old_grid.stride};
+    const double* const below{old_values + (row + 1) * old_grid.stride};
+    double* const output{new_values + row * new_grid.stride};
 
     // Adjacent columns use contiguous memory and have no loop-carried writes.
     #pragma omp simd

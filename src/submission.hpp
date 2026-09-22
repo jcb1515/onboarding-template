@@ -29,11 +29,30 @@ using GridView = BasicGridView<double>;
 // Grid owns one contiguous row-major allocation and its lifetime.
 class Grid {
 private:
+  static constexpr std::size_t cache_line_elements{64 / sizeof(double)};
+
   std::size_t rows_;
   std::size_t cols_;
-  // Keeping stride separate from cols allows the layout to support padding.
+  // One extra cache line rotates adjacent rows through cache sets.
   std::size_t stride_;
   std::vector<double> values_;
+
+  static std::size_t padded_stride(const std::size_t cols) {
+    if (cols == 0) {
+      return 0;
+    }
+
+    constexpr std::size_t maximum_padding{2 * cache_line_elements - 1};
+    if (cols > std::numeric_limits<std::size_t>::max() - maximum_padding) {
+      throw std::length_error(
+          "Grid column count is too large for cache-line stride padding");
+    }
+
+    const std::size_t rounded_cols{
+        (cols + cache_line_elements - 1) / cache_line_elements *
+        cache_line_elements};
+    return rounded_cols + cache_line_elements;
+  }
 
   static std::size_t checked_element_count(const std::size_t rows,
                                            const std::size_t stride) {
@@ -57,8 +76,8 @@ private:
 
 public:
   Grid(const std::size_t rows, const std::size_t cols)
-      : rows_{rows}, cols_{cols}, stride_{cols},
-        values_(checked_element_count(rows, cols), 0.0) {
+      : rows_{rows}, cols_{cols}, stride_{padded_stride(cols)},
+        values_(checked_element_count(rows, stride_), 0.0) {
   }
 
   std::size_t rows() const noexcept {
